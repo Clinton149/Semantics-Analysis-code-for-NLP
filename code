@@ -1,0 +1,215 @@
+# Install necessary packages
+!pip install gradio textblob textstat matplotlib nltk transformers
+
+# Import libraries
+import re
+from collections import Counter
+import gradio as gr
+from textblob import TextBlob
+from textstat import textstat
+import matplotlib.pyplot as plt
+import nltk
+from nltk.corpus import stopwords
+import openai
+from transformers import pipeline
+
+# Download stopwords for nltk
+nltk.download("stopwords")
+
+# Set OpenAI API key (replace with your actual key if needed)
+openai.api_key = 'your_openai_api_key'
+
+# Initialize Hugging Face pipeline for emotion detection
+emotion_detector = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
+
+class SpeechAnalyzer:
+    def analyze_speech(self, text, file):
+        try:
+            # Read file if uploaded
+            if file is not None:
+                with open(file.name, 'r', encoding='utf-8') as f:
+                    text = f.read()
+
+            # Clean and prepare text
+            cleaned_text = text.lower()
+            words = re.findall(r'\b\w+\b', cleaned_text)
+            sentences = re.split(r'[.!?]+', text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+
+            # Basic statistics
+            word_count = len(words)
+            sentence_count = len(sentences)
+            avg_sentence_length = word_count / sentence_count if sentence_count > 0 else 0
+
+            # Most common words
+            word_frequencies = Counter(words)
+            most_common_words = [word for word, _ in word_frequencies.most_common(5)]
+
+            # Sentence analysis
+            longest_sentence = max(sentences, key=len) if sentences else ""
+            shortest_sentence = min(sentences, key=len) if sentences else ""
+
+            # Readability score
+            flesch_score = textstat.flesch_reading_ease(text)
+
+            # Detailed Sentence-by-Sentence Sentiment Analysis
+            positive_count, negative_count, neutral_count = 0, 0, 0
+            sentence_sentiments = []
+            for sentence in sentences:
+                blob = TextBlob(sentence)
+                polarity = blob.sentiment.polarity
+                sentence_sentiments.append(polarity)
+
+                # Count sentence sentiment based on polarity
+                if polarity > 0.1:  # Positive threshold
+                    positive_count += 1
+                elif polarity < -0.1:  # Negative threshold
+                    negative_count += 1
+                else:
+                    neutral_count += 1
+
+            # Calculate overall sentiment
+            overall_polarity = sum(sentence_sentiments) / len(sentence_sentiments) if sentence_sentiments else 0
+            overall_sentiment = "positive" if overall_polarity > 0 else "negative" if overall_polarity < 0 else "neutral"
+
+            # Emotion Detection on High Polarity Sentences
+            high_polarity_sentences = [s for s, p in zip(sentences, sentence_sentiments) if abs(p) > 0.5]
+            emotion_counts = Counter()
+            for sentence in high_polarity_sentences[:10]:  # Limit to top 10 intense sentences
+                emotions = emotion_detector(sentence)
+                for emotion in emotions:
+                    if isinstance(emotion, dict) and 'label' in emotion and 'score' in emotion:
+                        emotion_counts[emotion['label']] += 1
+
+            # Plot sentiment arc
+            plt.figure(figsize=(10, 5))
+            plt.plot(sentence_sentiments, marker="o", linestyle="-", color="b", label="Sentiment Polarity")
+            plt.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+            plt.title("Sentiment Arc of Speech")
+            plt.xlabel("Sentence")
+            plt.ylabel("Sentiment Polarity")
+            plt.legend()
+            plt.savefig("/tmp/sentiment_arc.png")
+            plt.close()
+
+            # Plot sentiment distribution (positive, negative, neutral counts)
+            plt.figure(figsize=(6, 4))
+            plt.bar(["Positive", "Negative", "Neutral"], [positive_count, negative_count, neutral_count], color=["g", "r", "gray"])
+            plt.title("Sentiment Distribution")
+            plt.xlabel("Sentiment Type")
+            plt.ylabel("Count")
+            plt.savefig("/tmp/sentiment_summary.png")
+            plt.close()
+
+            # Plot emotion distribution
+            plt.figure(figsize=(8, 5))
+            plt.bar(emotion_counts.keys(), emotion_counts.values(), color="purple")
+            plt.title("Emotion Distribution in High Polarity Sentences")
+            plt.xlabel("Emotion")
+            plt.ylabel("Count")
+            plt.savefig("/tmp/emotion_summary.png")
+            plt.close()
+
+            # Speaking time estimation
+            speaking_time = word_count / 130  # in minutes
+
+            # Package results
+            analysis_results = {
+                "Total Words": word_count,
+                "Total Sentences": sentence_count,
+                "Average Sentence Length (words)": avg_sentence_length,
+                "Most Common Words": most_common_words,
+                "Longest Sentence": longest_sentence,
+                "Shortest Sentence": shortest_sentence,
+                "Flesch Reading Ease Score": flesch_score,
+                "Overall Sentiment": overall_sentiment,
+                "Positive Sentences": positive_count,
+                "Negative Sentences": negative_count,
+                "Neutral Sentences": neutral_count,
+                "Estimated Speaking Time (minutes)": speaking_time,
+                "Emotion Counts": dict(emotion_counts)
+            }
+
+            return analysis_results, "/tmp/sentiment_arc.png", "/tmp/sentiment_summary.png", "/tmp/emotion_summary.png"
+
+        except Exception as e:
+            return {"error": str(e)}, None, None, None
+
+    def chat_analyze(self, query, text=None, file=None):
+        if file is not None:
+            with open(file.name, 'r', encoding='utf-8') as f:
+                text = f.read()
+
+        try:
+            analysis_results, _, _, _ = self.analyze_speech(text, None)
+            prompt = f"User query: {query}\n\nHere is the text analysis result: {analysis_results}\n\nProvide a detailed response:"
+
+            response = openai.Completion.create(
+                model="gpt-4",
+                prompt=prompt,
+                max_tokens=100,
+                temperature=0.5
+            )
+
+            return response['choices'][0]['text']
+
+        except Exception as e:
+            return f"Error communicating with OpenAI API: {e}"
+
+# Initialize analyzer
+analyzer = SpeechAnalyzer()
+
+# Gradio interface for speech analysis with sentiment and emotion summaries
+speech_analysis_interface = gr.Interface(
+    fn=analyzer.analyze_speech,
+    inputs=[
+        gr.Textbox(
+            lines=10,
+            label="Enter speech text",
+            placeholder="Enter your speech text here or upload a file below"
+        ),
+        gr.File(
+            label="Or upload a text file",
+            file_types=[".txt"]
+        )
+    ],
+    outputs=[gr.JSON(label="Analysis Results"), gr.Image(label="Sentiment Arc"), gr.Image(label="Sentiment Summary"), gr.Image(label="Emotion Summary")],
+    title="Detailed Speech Analysis Tool with Sentiment and Emotion Analysis",
+    description=(
+        "This tool provides a comprehensive analysis of speech text, including basic statistics, readability score, "
+        "overall sentiment, detailed sentiment counts, and an emotion distribution. You can either paste your text "
+        "directly or upload a .txt file."
+    )
+)
+
+# Gradio chatbot interface for interactive queries with file upload
+chatbot_interface = gr.Interface(
+    fn=analyzer.chat_analyze,
+    inputs=[
+        gr.Textbox(
+            label="Ask about the analysis",
+            placeholder="e.g., What is the word count?"
+        ),
+        gr.Textbox(
+            label="Enter speech text for analysis (optional)",
+            lines=5,
+            placeholder="Enter your speech text here"
+        ),
+        gr.File(
+            label="Or upload a text file",
+            file_types=[".txt"]
+        )
+    ],
+    outputs="text",
+    title="Speech Analysis Chatbot with GPT Integration",
+    description="Ask questions about your speech, such as word count, sentiment, or speaking time estimate."
+)
+
+# Combine both interfaces into a single tabbed interface
+app = gr.TabbedInterface(
+    interface_list=[speech_analysis_interface, chatbot_interface],
+    tab_names=["Speech Analysis", "Chatbot"]
+)
+
+# Launch the combined interface
+app.launch(share=True)
